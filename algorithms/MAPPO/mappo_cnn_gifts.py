@@ -24,16 +24,23 @@ import os
 import matplotlib.pyplot as plt
 from PIL import Image
 from pathlib import Path
+from periodic_checkpoint import make_periodic_saver
+
+
+def get_activation(activation):
+    if activation == "relu":
+        return nn.relu
+    if activation == "gelu":
+        return nn.gelu
+    return nn.tanh
+
 
 class CNN(nn.Module):
     activation: str = "relu"
 
     @nn.compact
     def __call__(self, x):
-        if self.activation == "relu":
-            activation = nn.relu
-        else:
-            activation = nn.tanh
+        activation = get_activation(self.activation)
         x = nn.Conv(
             features=16,
             kernel_size=(3, 3),
@@ -71,10 +78,7 @@ class Actor(nn.Module):
 
     @nn.compact
     def __call__(self, obs):
-        if self.activation == "relu":
-            activation = nn.relu
-        else:
-            activation = nn.tanh
+        activation = get_activation(self.activation)
         embedding = CNN(self.activation)(obs)
         actor_mean = nn.Dense(
             16, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
@@ -96,10 +100,7 @@ class Critic(nn.Module):
     def __call__(self, x):
         world_state = x
 
-        if self.activation == "relu":
-            activation = nn.relu
-        else:
-            activation = nn.tanh
+        activation = get_activation(self.activation)
 
         embedding = CNN(self.activation)(world_state)
         hidden = nn.Dense(
@@ -118,6 +119,131 @@ class Critic(nn.Module):
         # squeeze 去除最后一个维度
         return jnp.squeeze(value, axis=-1)
     
+
+class TransformerVCritic(nn.Module):
+    num_agents: int
+    obs_channels: int
+    activation: str = "gelu"
+    n_embd: int = 64
+    n_head: int = 1
+    n_block: int = 1
+    zs_dim: int = 256
+    mlp_dim: int = 128
+    attention_temperature: float = 1.0
+
+    @nn.compact
+    def __call__(self, world_state):
+        if self.n_embd % self.n_head != 0:
+            raise ValueError("CRITIC.N_EMBD must be divisible by CRITIC.N_HEAD")
+
+        activation = get_activation(self.activation)
+        batch_size = world_state.shape[0]
+        obs_seq = world_state.reshape(
+            (
+                batch_size,
+                *world_state.shape[1:-1],
+                self.num_agents,
+                self.obs_channels,
+            )
+        )
+        obs_seq = jnp.transpose(obs_seq, (0, 3, 1, 2, 4))
+
+        obs_flat = obs_seq.reshape((-1,) + obs_seq.shape[-3:])
+        token = CNN(self.activation)(obs_flat)
+        token = nn.Dense(
+            self.n_embd,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(token)
+        token = activation(token)
+        token = token.reshape((batch_size, self.num_agents, self.n_embd))
+
+        agent_id = jax.nn.one_hot(jnp.arange(self.num_agents), self.num_agents)
+        agent_emb = nn.Dense(
+            self.n_embd,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(agent_id)
+        token = token + agent_emb[None, :, :]
+
+        head_dim = self.n_embd // self.n_head
+        temperature = jnp.maximum(
+            jnp.asarray(self.attention_temperature, dtype=token.dtype), 1e-6
+        )
+
+        for _ in range(self.n_block):
+            residual = token
+            normed = nn.LayerNorm()(token)
+            query = nn.Dense(
+                self.n_embd,
+                use_bias=False,
+                kernel_init=orthogonal(np.sqrt(2)),
+            )(normed)
+            key = nn.Dense(
+                self.n_embd,
+                use_bias=False,
+                kernel_init=orthogonal(np.sqrt(2)),
+            )(normed)
+            value = nn.Dense(
+                self.n_embd,
+                use_bias=False,
+                kernel_init=orthogonal(np.sqrt(2)),
+            )(normed)
+
+            query = query.reshape(
+                (batch_size, self.num_agents, self.n_head, head_dim)
+            ).transpose((0, 2, 1, 3))
+            key = key.reshape(
+                (batch_size, self.num_agents, self.n_head, head_dim)
+            ).transpose((0, 2, 1, 3))
+            value = value.reshape(
+                (batch_size, self.num_agents, self.n_head, head_dim)
+            ).transpose((0, 2, 1, 3))
+
+            att_logits = jnp.einsum("bhid,bhjd->bhij", query, key) / jnp.sqrt(head_dim)
+            attention = nn.softmax(att_logits / temperature, axis=-1)
+            attended = jnp.einsum("bhij,bhjd->bhid", attention, value)
+            attended = attended.transpose((0, 2, 1, 3)).reshape(
+                (batch_size, self.num_agents, self.n_embd)
+            )
+            attended = nn.Dense(
+                self.n_embd,
+                kernel_init=orthogonal(np.sqrt(2)),
+                bias_init=constant(0.0),
+            )(attended)
+            token = residual + attended
+
+            residual = token
+            normed = nn.LayerNorm()(token)
+            hidden = nn.Dense(
+                self.mlp_dim,
+                kernel_init=orthogonal(np.sqrt(2)),
+                bias_init=constant(0.0),
+            )(normed)
+            hidden = activation(hidden)
+            hidden = nn.Dense(
+                self.n_embd,
+                kernel_init=orthogonal(np.sqrt(2)),
+                bias_init=constant(0.0),
+            )(hidden)
+            token = residual + hidden
+
+        token = nn.LayerNorm()(token)
+        zs = token.reshape((batch_size, self.num_agents * self.n_embd))
+        zs = nn.Dense(
+            self.zs_dim,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(zs)
+        zs = activation(zs)
+
+        value = nn.Dense(
+            features=1,
+            kernel_init=orthogonal(0.01),
+            bias_init=constant(0.0),
+        )(zs)
+        return jnp.squeeze(value, axis=-1)
+
 
 class Transition(NamedTuple):
     global_done: jnp.ndarray
@@ -151,6 +277,18 @@ def unbatchify(x: jnp.ndarray, agent_list, num_envs, num_actors):
 
 def make_train(config):
     env = socialjax.make(config["ENV_NAME"], **config["ENV_KWARGS"])
+    critic_config = config.get("CRITIC", {})
+    critic_type = str(critic_config.get("TYPE", "cnn")).lower()
+    use_transformer_critic = critic_type in {
+        "transformer",
+        "transformer_v",
+        "transformer_v_critic",
+    }
+    if critic_type not in {"cnn", "ff"} and not use_transformer_critic:
+        raise NotImplementedError(
+            "Supported CRITIC.TYPE values are 'cnn' and 'transformer'."
+        )
+
     config["NUM_ACTORS"] = env.num_agents * config["NUM_ENVS"]
     config["NUM_UPDATES"] = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
@@ -174,15 +312,28 @@ def make_train(config):
     def train(rng):
 
         # INIT NETWORK
+        obs_shape = env.observation_space()[0].shape
         actor_network = Actor(env.action_space().n, activation=config["ACTIVATION"])
-        critic_network = Critic(activation=config["ACTIVATION"])
+        if use_transformer_critic:
+            critic_network = TransformerVCritic(
+                num_agents=env.num_agents,
+                obs_channels=obs_shape[-1],
+                activation=critic_config.get("ACTIVATION", "gelu"),
+                n_embd=int(critic_config.get("N_EMBD", 64)),
+                n_head=int(critic_config.get("N_HEAD", 1)),
+                n_block=int(critic_config.get("N_BLOCK", 1)),
+                zs_dim=int(critic_config.get("ZS_DIM", 256)),
+                mlp_dim=int(critic_config.get("MLP_DIM", 128)),
+                attention_temperature=float(critic_config.get("ATT_TEMPERATURE", 1.0)),
+            )
+        else:
+            critic_network = Critic(activation=critic_config.get("ACTIVATION", config["ACTIVATION"]))
 
         rng, _rng_actor, _rng_critic = jax.random.split(rng, 3)
-        ac_init_x = jnp.zeros((1, *(env.observation_space()[0]).shape))
+        ac_init_x = jnp.zeros((1, *obs_shape))
             
         actor_network_params = actor_network.init(_rng_actor, ac_init_x)
 
-        obs_shape = env.observation_space()[0].shape
         global_shape = (1, *obs_shape[:-1], obs_shape[-1] * env.num_agents)
         cr_init_x = jnp.zeros(global_shape)
         # cr_init_x = jnp.zeros((1, *(env.observation_space()[0]).shape)) 
@@ -213,7 +364,7 @@ def make_train(config):
             tx=actor_tx,
         )
         critic_train_state = TrainState.create(
-            apply_fn=actor_network.apply,
+            apply_fn=critic_network.apply,
             params=critic_network_params,
             tx=critic_tx,
         )
@@ -270,7 +421,7 @@ def make_train(config):
                     env.step, in_axes=(0, 0, 0)
                 )(rng_step, env_state, env_act)
 
-                info = jax.tree_map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
+                info = jax.tree_util.tree_map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
                 done_batch = batchify(done, env.agents, config["NUM_ACTORS"]).squeeze()
                 transition = Transition(
                     jnp.tile(done["__all__"], env.num_agents),
@@ -331,7 +482,7 @@ def make_train(config):
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
-                    actor_train_state, critic_train_state = train_states
+                    actor_train_state, critic_train_state = train_state
                     traj_batch, advantages, targets = batch_info
 
                     def _actor_loss_fn(actor_params, traj_batch, gae):
@@ -488,22 +639,24 @@ def make_train(config):
             train_states = update_state[0]
             metric = traj_batch.info
             # loss_info["ratio_0"] = loss_info["ratio"].at[0,0].get()
-            # loss_info = jax.tree_map(lambda x: x.mean(), loss_info)
+            # loss_info = jax.tree_util.tree_map(lambda x: x.mean(), loss_info)
             # metric["loss"] = loss_info
             rng = update_state[-1]
 
             def callback(metric):
                 wandb.log(metric)
             update_steps = update_steps + 1
-            metric = jax.tree_map(lambda x: x.mean(), metric)
+            metric = jax.tree_util.tree_map(lambda x: x.mean(), metric)
             metric["update_steps"] = update_steps
             metric["env_step"] = update_steps * config["NUM_STEPS"] * config["NUM_ENVS"]
 
             metric["give_actions"] = metric["give_actions"] * config["ENV_KWARGS"]["num_inner_steps"]
+            metric["transformer_critic"] = jnp.array(1.0 if use_transformer_critic else 0.0)
 
             # jax.experimental.io_callback(callback, None, metric)
 
             jax.debug.callback(callback, metric)
+            jax.debug.callback(_periodic_saver, update_steps, train_states[0].params)
             runner_state = (train_states, env_state, last_obs, last_done, rng)
             return (runner_state, update_steps), metric
 
@@ -515,6 +668,9 @@ def make_train(config):
             jnp.zeros((config["NUM_ACTORS"]), dtype=bool),
             _rng,
         )
+        _periodic_saver = make_periodic_saver(
+            config, f'{config["ENV_NAME"]}_seed{config["SEED"]}_reward_{config["REWARD"]}'
+        )
         runner_state, metric = jax.lax.scan(
             _update_step, (runner_state, 0), None, config["NUM_UPDATES"]
         )
@@ -524,13 +680,14 @@ def make_train(config):
 
 def single_run(config):
     config = OmegaConf.to_container(config)
+    critic_type = str(config.get("CRITIC", {}).get("TYPE", "cnn")).lower()
     wandb.init(
         entity=config["ENTITY"],
         project=config["PROJECT"],
-        tags=["MAPPO", "FF"],
+        tags=["MAPPO", "CNN_ACTOR", f"CRITIC_{critic_type.upper()}"],
         config=config,
         mode=config["WANDB_MODE"],
-        name=f'mappo_cnn_gifts'
+        name=f'mappo_cnn_gifts_{critic_type}'
     )
 
     rng = jax.random.PRNGKey(config["SEED"])
@@ -543,7 +700,7 @@ def single_run(config):
 
     print("** Saving Results **")
     filename = f'{config["ENV_NAME"]}_seed{config["SEED"]}_reward_{config["REWARD"]}'
-    train_state = jax.tree_map(lambda x: x[0], out["runner_state"][0][0][0])
+    train_state = jax.tree_util.tree_map(lambda x: x[0], out["runner_state"][0][0][0])
     save_path = f"./checkpoints/{filename}.pkl"
     save_params(train_state, save_path)
     params = load_params(save_path)
@@ -681,7 +838,7 @@ def tune(default_config):
         rngs = jax.random.split(rng, config["NUM_SEEDS"])
         train_vjit = jax.jit(jax.vmap(make_train(config)))
         outs = jax.block_until_ready(train_vjit(rngs))
-        train_state = jax.tree_map(lambda x: x[0], outs["runner_state"][0])
+        train_state = jax.tree_util.tree_map(lambda x: x[0], outs["runner_state"][0])
 
         # Evaluate and log
         # params = load_params(train_state.params)

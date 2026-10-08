@@ -24,6 +24,7 @@ import os
 import matplotlib.pyplot as plt
 from PIL import Image
 from pathlib import Path
+from periodic_checkpoint import make_periodic_saver
 
 class CNN(nn.Module):
     activation: str = "relu"
@@ -270,7 +271,7 @@ def make_train(config):
                     env.step, in_axes=(0, 0, 0)
                 )(rng_step, env_state, env_act)
 
-                info = jax.tree_map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
+                info = jax.tree_util.tree_map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
                 done_batch = batchify(done, env.agents, config["NUM_ACTORS"]).squeeze()
                 transition = Transition(
                     jnp.tile(done["__all__"], env.num_agents),
@@ -488,14 +489,14 @@ def make_train(config):
             train_states = update_state[0]
             metric = traj_batch.info
             # loss_info["ratio_0"] = loss_info["ratio"].at[0,0].get()
-            # loss_info = jax.tree_map(lambda x: x.mean(), loss_info)
+            # loss_info = jax.tree_util.tree_map(lambda x: x.mean(), loss_info)
             # metric["loss"] = loss_info
             rng = update_state[-1]
 
             def callback(metric):
                 wandb.log(metric)
             update_steps = update_steps + 1
-            metric = jax.tree_map(lambda x: x.mean(), metric)
+            metric = jax.tree_util.tree_map(lambda x: x.mean(), metric)
             metric["env_step"] = update_steps * config["NUM_STEPS"] * config["NUM_ENVS"]
 
 
@@ -505,6 +506,7 @@ def make_train(config):
             # jax.experimental.io_callback(callback, None, metric)
 
             jax.debug.callback(callback, metric)
+            jax.debug.callback(_periodic_saver, update_steps, train_states[0].params)
             runner_state = (train_states, env_state, last_obs, last_done, rng)
             return (runner_state, update_steps), metric
 
@@ -515,6 +517,9 @@ def make_train(config):
             obsv,
             jnp.zeros((config["NUM_ACTORS"]), dtype=bool),
             _rng,
+        )
+        _periodic_saver = make_periodic_saver(
+            config, f'{config["ENV_NAME"]}_seed{config["SEED"]}_reward_{config["REWARD"]}'
         )
         runner_state, metric = jax.lax.scan(
             _update_step, (runner_state, 0), None, config["NUM_UPDATES"]
@@ -544,7 +549,7 @@ def single_run(config):
 
     print("** Saving Results **")
     filename = f'{config["ENV_NAME"]}_seed{config["SEED"]}_reward_{config["REWARD"]}'
-    train_state = jax.tree_map(lambda x: x[0], out["runner_state"][0][0][0])
+    train_state = jax.tree_util.tree_map(lambda x: x[0], out["runner_state"][0][0][0])
     save_path = f"./checkpoints/{filename}.pkl"
     save_params(train_state, save_path)
     params = load_params(save_path)
@@ -682,7 +687,7 @@ def tune(default_config):
         rngs = jax.random.split(rng, config["NUM_SEEDS"])
         train_vjit = jax.jit(jax.vmap(make_train(config)))
         outs = jax.block_until_ready(train_vjit(rngs))
-        train_state = jax.tree_map(lambda x: x[0], outs["runner_state"][0])
+        train_state = jax.tree_util.tree_map(lambda x: x[0], outs["runner_state"][0])
 
         # Evaluate and log
         # params = load_params(train_state.params)

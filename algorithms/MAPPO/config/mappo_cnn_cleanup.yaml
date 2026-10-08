@@ -1,7 +1,7 @@
 "LR": 0.001
 "NUM_ENVS": 4
 "NUM_STEPS": 100
-"TOTAL_TIMESTEPS": 1e8
+"TOTAL_TIMESTEPS": 3e8
 "UPDATE_EPOCHS": 2
 "NUM_MINIBATCHES": 4
 "GAMMA": 0.99
@@ -34,7 +34,7 @@
 
 # WandB Params
 "ENTITY": ""
-"PROJECT": "socialjax"
+"PROJECT": "socialjax_clean_up"
 "WANDB_MODE" : "online"
 "WANDB_TAGS":
   - COMMON_REWARD # COMMON_REWARD; INDIVIDUAL_REWARD

@@ -1,0 +1,153 @@
+# defaults:
+#   - _self_
+#   - method: maca_mlae   # alias: override per run with `method=maca` / `method=mappo_trans`
+
+"LR": 0.0005
+"NUM_ENVS": 5
+"NUM_STEPS": 100
+"TOTAL_TIMESTEPS": 1.6e8
+"UPDATE_EPOCHS": 2
+"NUM_MINIBATCHES": 4
+"GAMMA": 0.99
+"GAE_LAMBDA": 0.95
+"CLIP_EPS": 0.2
+"ENT_COEF": 0.01
+"VF_COEF": 0.5
+"MAX_GRAD_NORM": 0.5
+"SCALE_CLIP_EPS": True
+
+"ACTIVATION": "relu"
+"ENV_NAME": "harvest_common_open"
+"REW_SHAPING_HORIZON": 2.5e6 # for how many timesteps add a shaping reward
+
+"ENV_KWARGS": 
+  "num_agents" : 7
+  "num_inner_steps" : 1000
+  "shared_rewards" : True  # Attention: switch to False for individual rewards 
+  "cnn" : True
+  "jit" : True
+  
+
+"ANNEAL_LR": True
+"SEED": 30
+"NUM_SEEDS": 1
+"TUNE": False
+
+"MACA":
+  # "joint" keeps the old MAPPO-equivalent GAE sanity check.
+  # "maca_jnt", "maca_ind", "maca_cor", and "maca_full" use the Figure-1-style Q critic.
+  "MODE": "maca_full"
+  "N_EMBD": 64
+  "ZS_DIM": 256
+  "CRITIC_ACTIVATION": "gelu"
+  "Q_HEAD_TYPE": "linear" # "linear", "pairwise_fuse", "pairwise_full", or "agent_action_fuse"
+  "PAIRWISE_RANK": 8
+  "PAIRWISE_COEF": 0.5
+  "FUSE_HIDDEN_DIM": 128
+  "PAIR_HIDDEN_DIM": 128 # hidden width for the pair MLP in "pairwise_full"
+  "TARGET_AGENT_CONDITIONING": False # leave False for "pairwise_full" so b_jnt stays global
+  "ATT_SIGMA": 0.143 #0.14285714285714285 # 1 / num_agents
+  "ATT_TEMPERATURE": 1 # <1 sharpens attention; >1 makes it more uniform.
+  "PSI_TYPE": "fixed" # "fixed" keeps PSI constant; "learned" optimizes b^MACA mixture weights.
+  "PSI": [0.3333333, 0.3333333, 0.3333334]
+  "Q_VALUE_LOSS_COEF": 0.5
+  "V_VALUE_LOSS_COEF": 1.0
+  "CRITIC_LOSS_TYPE": "gae_return" # "gae_return" restores the previous target loss; "td" uses paper TD.
+  # Self-consistency loss for the multi-level baseline b^MACA used by full MACA-GAE.
+  # gae_return -> fit b^MACA to R^MACA (its own lambda-return); td -> fit to r + gamma*b^MACA(s').
+  # 0.0 disables it (legacy behaviour); set > 0 to anchor the bootstrap value full_maca_gae relies on.
+  "MLA_BASELINE_LOSS_COEF": 0.0
+  "IND_BASELINE_LOSS_COEF": 0.0
+  "COR_BASELINE_LOSS_COEF": 0.0
+  # Actor advantage source for Q-critic modes.
+  # "lambda_mla" uses R_t^lambda - b_i^MLA.
+  # "mixed_q" (alias: "mix_q") softly mixes lambda_mla with Q(s,a)-b_i^MLA.
+  # "full_maca_gae" runs GAE with b^MACA_i replacing V at every step.
+  # "baseline_maca_gae" runs GAE replacing ONLY the subtracted baseline with b^MACA_i,
+  #   keeping V for the bootstrap: delta_t = r_t + gamma*V(s_{t+1}) - b^MACA_i(s_t, a_t).
+  #   (Biased advantage estimator: telescoping breaks when b^MACA != V.)
+  # Legacy options: "gae", "q", "q_warmup".
+  "ADVANTAGE_SOURCE": "gae" # "lambda_mla"; "mixed_q"; "gae"; "q"; "q_warmup"; "full_maca_gae"; "baseline_maca_gae"
+  "Q_ADV_MIX_COEF": 0.1
+  "Q_ADV_WARMUP_UPDATES": 40000
+  "Q_ADV_MIN_STD": 0.001
+
+"REWARD": "MACA_JNT" # individual; common
+"GIF_NUM_FRAMES": 250
+"CHECKPOINT_DIR": "./checkpoints/mappo_trans"
+
+# WandB Params
+"ENTITY": ""
+"PROJECT": "socialjax_harvest"
+"WANDB_MODE" : "online"
+"WANDB_TAGS":
+  - COMMON_REWARD # COMMON_REWARD; INDIVIDUAL_REWARD
+
+
+
+# "LR": 0.0005
+# "NUM_ENVS": 5
+# "NUM_STEPS": 100
+# "TOTAL_TIMESTEPS": 3e8
+# "UPDATE_EPOCHS": 2
+# "NUM_MINIBATCHES": 4
+# "GAMMA": 0.99
+# "GAE_LAMBDA": 0.95
+# "CLIP_EPS": 0.1
+# "ENT_COEF": 0.01
+# "VF_COEF": 0.5
+# "MACA_V_COEF": 1.0
+# "MACA_Q_COEF": 0.5
+# "MACA_EQ_COEF": 1.0
+# "MACA_N_EMBD": 64
+# "MACA_ZS_DIM": 256
+# "MACA_N_HEAD": 1
+# "MACA_N_LAYER": 1
+# "MACA_ATT_SIGMA": 1.0
+# "MACA_ATT_ROLL_RES": False  # official default: no residual in attention rollout
+# "MACA_VQ_BSLN_COEF": 0.3
+# "MACA_VQ_COMA_BSLN_COEF": 0.3
+# "MACA_Q_HEAD_TYPE": "low_ramk_pairwise" # full_pairwise | low_rank_pairwise | mlp(default)
+# "MACA_PAIRWISE_RANK": 8
+# "MACA_PAIRWISE_COEF": 1.0
+# # Advantage variant:
+# #   False -> official MACA: A_t = R_t^{eq}(GAE) - B(s_t, a_t)
+# #   True  -> full MACA GAE: V replaced by multi-level baseline B in the GAE
+# #            recursion (delta_t = r_t + gamma*B(s_{t+1},a_{t+1}) - B(s_t,a_t))
+# "MACA_FULL_GAE": False
+
+# # Network sizing (shared by actor & critic CNN). Original (small) design.
+# "CNN_FEATURES": [16]
+# "CNN_KERNELS": [3]
+# "FC_DIM_SIZE": 16
+# "ACTOR_HIDDEN_DIM": 16
+
+# "MAX_GRAD_NORM": 0.5
+# "SCALE_CLIP_EPS": True
+
+# "ACTIVATION": "relu"
+# "ENV_NAME": "harvest_common_open"
+# "REW_SHAPING_HORIZON": 2.5e6 # for how many timesteps add a shaping reward
+
+# "ENV_KWARGS": 
+#   "num_agents" : 7
+#   "num_inner_steps" : 1000
+#   "shared_rewards" : True  # Attention: switch to False for individual rewards 
+#   "cnn" : True
+#   "jit" : True
+  
+
+# "ANNEAL_LR": False
+# "SEED": 30
+# "NUM_SEEDS": 1
+# "TUNE": False
+
+# "REWARD": "MACA" # individual; common
+# "GIF_NUM_FRAMES": 250
+
+# # WandB Params
+# "ENTITY": "j-jiseong-okayama-university"
+# "PROJECT": "socialjax_harvest"
+# "WANDB_MODE" : "online"
+# "WANDB_TAGS":
+#   - COMMON_REWARD # COMMON_REWARD; INDIVIDUAL_REWARD

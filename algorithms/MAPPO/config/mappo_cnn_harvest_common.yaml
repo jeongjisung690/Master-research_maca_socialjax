@@ -1,7 +1,7 @@
 "LR": 0.0005
 "NUM_ENVS": 5
 "NUM_STEPS": 100
-"TOTAL_TIMESTEPS": 1e9
+"TOTAL_TIMESTEPS": 1.6e8
 "UPDATE_EPOCHS": 2
 "NUM_MINIBATCHES": 4
 "GAMMA": 0.99
@@ -31,10 +31,12 @@
 
 "REWARD": "MAPPO" # individual; common
 "GIF_NUM_FRAMES": 250
+"CHECKPOINT_DIR": "./checkpoints/mappo/harvest_open"
+
 
 # WandB Params
 "ENTITY": ""
-"PROJECT": "socialjax_mappo"
+"PROJECT": "socialjax_harvest"
 "WANDB_MODE" : "online"
 "WANDB_TAGS":
   - COMMON_REWARD # COMMON_REWARD; INDIVIDUAL_REWARD
